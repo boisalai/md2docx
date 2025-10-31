@@ -8,6 +8,11 @@ import pytest
 from pathlib import Path
 import tempfile
 import shutil
+import sys
+
+# Add src to path for testing
+sys.path.insert(0, str(Path(__file__).parent / 'src'))
+
 from md2docx import (
     MarkdownToDocxConverter,
     DocumentConfig,
@@ -173,9 +178,10 @@ class TestMarkdownToDocxConverter:
             "test.docx",
             str(temp_dir)
         )
-        assert work_dir == temp_dir
-        assert input_path == temp_dir / "test.md"
-        assert output_path == temp_dir / "test.docx"
+        # Use resolve() to handle symlinks (e.g., /var -> /private/var on macOS)
+        assert work_dir.resolve() == temp_dir.resolve()
+        assert input_path.resolve() == (temp_dir / "test.md").resolve()
+        assert output_path.resolve() == (temp_dir / "test.docx").resolve()
 
     def test_setup_paths_invalid_directory(self, converter):
         """Test path setup with invalid directory."""

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2025-10-31
+
+### Changed
+- Reorganized project structure with src/ layout
+- Moved main code to src/md2docx/converter.py
+- Created proper Python package structure with __init__.py
+- Added CLI support via __main__.py (can now run with `python -m md2docx`)
+
+### Fixed
+- Updated README.md project structure documentation
+- Fixed import paths in tests for new structure
+
 ## [1.1.0] - 2025-10-31
 
 ### Added
