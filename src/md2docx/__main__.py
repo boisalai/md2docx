@@ -39,7 +39,7 @@ Examples:
                        help='Paper size (default: letter)')
     parser.add_argument('--no-toc', action='store_true', help='Disable table of contents')
     parser.add_argument('-q', '--quiet', action='store_true', help='Quiet mode (only show errors)')
-    parser.add_argument('--version', action='version', version='%(prog)s 1.1.2')
+    parser.add_argument('--version', action='version', version='%(prog)s 1.1.3')
 
     args = parser.parse_args()
 

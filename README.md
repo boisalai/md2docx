@@ -25,6 +25,7 @@ A Python tool for converting Markdown documents to professionally formatted Word
 
 - Python 3.12 or higher
 - Pandoc (external dependency for document conversion)
+- uv (recommended for package management) or pip
 
 ### Python Dependencies
 
@@ -32,7 +33,23 @@ A Python tool for converting Markdown documents to professionally formatted Word
 
 ## Installation
 
-### 1. Install Pandoc
+### 1. Install uv (recommended)
+
+uv is a fast Python package installer and resolver. It's much faster than pip.
+
+**macOS and Linux:**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Windows:**
+```bash
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+For more installation options, see [uv documentation](https://docs.astral.sh/uv/getting-started/installation/).
+
+### 2. Install Pandoc
 
 **macOS:**
 ```bash
@@ -47,20 +64,23 @@ sudo apt-get install pandoc
 **Windows:**
 Download and install from [https://pandoc.org/installing.html](https://pandoc.org/installing.html)
 
-### 2. Install Python Package
+### 3. Install Python Package
 
 ```bash
 # Clone the repository
 git clone https://github.com/boisalai/md2docx.git
 cd md2docx
 
-# Install the package
-pip install .
+# Install the package with uv (recommended)
+uv pip install .
 
 # Or install in development mode
-pip install -e .
+uv pip install -e .
 
 # Or with development dependencies
+uv pip install -e ".[dev]"
+
+# Alternative: using standard pip
 pip install -e ".[dev]"
 ```
 
@@ -349,8 +369,8 @@ logging.getLogger('md2docx').addHandler(handler)
 The project includes comprehensive unit tests. To run them:
 
 ```bash
-# Install development dependencies
-pip install -e ".[dev]"
+# Install development dependencies with uv (recommended)
+uv pip install -e ".[dev]"
 
 # Run tests
 pytest tests/ -v
