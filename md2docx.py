@@ -18,10 +18,21 @@ from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.shared import OxmlElement
 from docx.oxml.ns import qn
+from docx.oxml import parse_xml
 from docx.table import _Cell
 import subprocess
 import shutil
 import re
+import logging
+import platform
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s: %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 class PaperSize(Enum):
@@ -58,6 +69,17 @@ class DocumentConfig:
         language: Document language code (e.g., 'en-US', 'fr-CA')
     """
 
+    # Style constants
+    DEFAULT_TITLE_SIZE = 24
+    DEFAULT_HEADING_1_SIZE = 18
+    DEFAULT_HEADING_2_SIZE = 16
+    DEFAULT_HEADING_3_SIZE = 14
+    DEFAULT_TABLE_FONT_SIZE = 10
+    DEFAULT_FOOTER_FONT_SIZE = 10
+    DEFAULT_FOOTNOTE_FONT_SIZE = 10
+    DEFAULT_PARAGRAPH_SPACING = 6
+    DEFAULT_TABLE_CELL_SPACING = 2
+
     def __init__(
         self,
         style: DocumentStyle = DocumentStyle.REPORT,
@@ -92,6 +114,34 @@ class DocumentConfig:
         self.line_spacing = line_spacing
         self.generate_toc = generate_toc
         self.language = language
+
+        # Validate configuration
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate configuration parameters."""
+        # Validate font size
+        if self.base_font_size <= 0:
+            raise ValueError(f"Base font size must be positive, got {self.base_font_size}")
+
+        # Validate margins
+        if any(m < 0 for m in self.margins):
+            raise ValueError(f"Margins must be non-negative, got {self.margins}")
+
+        # Validate line spacing
+        if self.line_spacing <= 0:
+            raise ValueError(f"Line spacing must be positive, got {self.line_spacing}")
+
+        # Validate heading colors
+        for level, color in self.heading_colors.items():
+            if not isinstance(color, tuple) or len(color) != 3:
+                raise ValueError(f"Color for heading {level} must be RGB tuple, got {color}")
+            if not all(0 <= c <= 255 for c in color):
+                raise ValueError(f"RGB values must be 0-255, got {color}")
+
+        # Validate footer text
+        if not isinstance(self.footer_text, dict) or 'odd' not in self.footer_text or 'even' not in self.footer_text:
+            raise ValueError("footer_text must be a dict with 'odd' and 'even' keys")
 
     @classmethod
     def create_report_style(cls, **kwargs):
@@ -147,22 +197,43 @@ class MarkdownToDocxConverter:
     - Language settings
     """
 
-    def __init__(self, config: DocumentConfig = None):
+    # Image processing constants
+    MAX_IMAGE_WIDTH = Inches(6)
+    SUPPORTED_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp'}
+
+    # Compiled regex patterns
+    IMAGE_PATTERN = re.compile(r'!\[(.*?)\]\((.*?)\)')
+
+    def __init__(self, config: DocumentConfig = None, verbose: bool = True):
         """
         Initialize the converter.
 
         Args:
             config: Document configuration. If None, uses default settings.
+            verbose: Enable verbose logging output.
         """
         self.config = config or DocumentConfig()
+        self.verbose = verbose
+
+        if not verbose:
+            logger.setLevel(logging.WARNING)
+
         self._check_dependencies()
 
     def _check_dependencies(self) -> None:
         """Verify that Pandoc is installed on the system."""
         if not shutil.which('pandoc'):
+            system = platform.system()
+            install_instructions = {
+                'Darwin': 'brew install pandoc',
+                'Linux': 'sudo apt-get install pandoc  # or use your package manager',
+                'Windows': 'Download from https://pandoc.org/installing.html'
+            }
+            instruction = install_instructions.get(system, 'See https://pandoc.org/installing.html')
+
             raise RuntimeError(
-                "Pandoc is not installed. "
-                "Please install it: https://pandoc.org/installing.html"
+                f"Pandoc is not installed.\n"
+                f"Installation: {instruction}"
             )
 
     def _extract_title_from_markdown(self, content: str) -> str:
@@ -191,12 +262,12 @@ class MarkdownToDocxConverter:
         Returns:
             List of dictionaries containing image metadata
         """
-        image_pattern = r'!\[(.*?)\]\((.*?)\)'
-        matches = re.findall(image_pattern, content)
+        matches = self.IMAGE_PATTERN.findall(content)
 
         image_refs = []
         for alt_text, path in matches:
             path = path.strip()
+            # Remove 'img/' prefix if present
             if path.startswith('img/'):
                 path = path[4:]
 
@@ -206,7 +277,7 @@ class MarkdownToDocxConverter:
                 'original_markdown': f'![{alt_text}]({path})'
             })
 
-        print(f"Found {len(image_refs)} image references")
+        logger.info(f"Found {len(image_refs)} image references")
         return image_refs
 
     def _remove_image_references(self, content: str) -> str:
@@ -219,8 +290,7 @@ class MarkdownToDocxConverter:
         Returns:
             Content with images replaced by placeholders
         """
-        image_pattern = r'!\[(.*?)\]\((.*?)\)'
-        return re.sub(image_pattern, r'[IMAGE_PLACEHOLDER]', content)
+        return self.IMAGE_PATTERN.sub(r'[IMAGE_PLACEHOLDER]', content)
 
     def _run_pandoc_conversion(self, input_path: Path, output_path: Path, title: str) -> None:
         """
@@ -234,22 +304,23 @@ class MarkdownToDocxConverter:
             output_path: Path to output docx file
             title: Document title
         """
+        lua_path = None
         try:
             lua_path = self._create_lua_script(input_path)
             cmd = self._build_pandoc_command(input_path, output_path, title, lua_path)
 
-            try:
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                print("Pandoc conversion completed successfully")
-            except subprocess.CalledProcessError as e:
-                print(f"Pandoc conversion failed: {e.stderr}")
-                raise
-            finally:
-                self._cleanup_lua_script(lua_path)
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            logger.info("Pandoc conversion completed successfully")
 
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Pandoc conversion failed: {e.stderr}")
+            raise RuntimeError(f"Pandoc conversion failed: {e.stderr}")
         except Exception as e:
-            print(f"Error during pandoc conversion: {str(e)}")
+            logger.error(f"Error during pandoc conversion: {str(e)}")
             raise
+        finally:
+            if lua_path:
+                self._cleanup_lua_script(lua_path)
 
     def _create_lua_script(self, input_path: Path) -> Path:
         """
@@ -272,6 +343,11 @@ class MarkdownToDocxConverter:
         end
         """
         lua_path = input_path.parent / "adjust_headers.lua"
+
+        # Check if file already exists
+        if lua_path.exists():
+            logger.warning(f"Lua script already exists at {lua_path}, overwriting")
+
         with open(lua_path, 'w', encoding='utf-8') as f:
             f.write(lua_script)
         return lua_path
@@ -320,13 +396,12 @@ class MarkdownToDocxConverter:
             if lua_path.exists():
                 lua_path.unlink()
         except Exception as e:
-            print(f"Warning: Could not delete temporary Lua file: {e}")
+            logger.warning(f"Could not delete temporary Lua file: {e}")
 
     def convert(self,
                 input_file: str,
                 output_file: str,
-                working_dir: Optional[str] = None,
-                extra_args: Optional[List[str]] = None) -> None:
+                working_dir: Optional[str] = None) -> None:
         """
         Convert a Markdown file to Word format.
 
@@ -334,7 +409,10 @@ class MarkdownToDocxConverter:
             input_file: Name of the input markdown file
             output_file: Name for the output docx file
             working_dir: Working directory (defaults to current directory)
-            extra_args: Additional pandoc arguments (currently unused)
+
+        Raises:
+            FileNotFoundError: If input file doesn't exist
+            RuntimeError: If conversion fails
         """
         work_dir, input_path, output_path = self._setup_paths(
             input_file, output_file, working_dir
@@ -342,6 +420,10 @@ class MarkdownToDocxConverter:
 
         if not input_path.exists():
             raise FileNotFoundError(f"Input file not found: {input_path}")
+
+        # Validate input is a markdown file
+        if input_path.suffix.lower() not in {'.md', '.markdown'}:
+            logger.warning(f"Input file {input_path} may not be a markdown file")
 
         img_dir = self._create_image_directory(work_dir)
         content = self._read_markdown_content(input_path)
@@ -351,9 +433,8 @@ class MarkdownToDocxConverter:
 
         try:
             self._run_pandoc_conversion(temp_md, output_path, document_title)
-            self._post_process_document(output_path, document_title)
-            self._insert_images(output_path, image_refs, work_dir)
-            print(f"Conversion successful! File saved: {output_path}")
+            self._post_process_document(output_path, document_title, image_refs, work_dir)
+            logger.info(f"Conversion successful! File saved: {output_path}")
         finally:
             self._cleanup_temp_markdown(temp_md)
 
@@ -371,8 +452,21 @@ class MarkdownToDocxConverter:
             Tuple of (working_dir, input_path, output_path)
         """
         work_dir = Path(working_dir).resolve() if working_dir else Path.cwd()
+
+        # Validate working directory exists
+        if not work_dir.exists():
+            raise FileNotFoundError(f"Working directory not found: {work_dir}")
+
         input_path = work_dir / input_file
         output_path = work_dir / output_file
+
+        # Prevent path traversal
+        try:
+            input_path.resolve().relative_to(work_dir.resolve())
+            output_path.resolve().relative_to(work_dir.resolve())
+        except ValueError:
+            raise ValueError("File paths must be within the working directory")
+
         return work_dir, input_path, output_path
 
     def _create_image_directory(self, work_dir: Path) -> Path:
@@ -388,7 +482,7 @@ class MarkdownToDocxConverter:
         img_dir = work_dir / "img"
         if not img_dir.exists():
             img_dir.mkdir(parents=True)
-            print(f"Created image directory: {img_dir}")
+            logger.info(f"Created image directory: {img_dir}")
         return img_dir
 
     def _read_markdown_content(self, input_path: Path) -> str:
@@ -400,9 +494,15 @@ class MarkdownToDocxConverter:
 
         Returns:
             File content as string
+
+        Raises:
+            IOError: If file cannot be read
         """
-        with open(input_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        try:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except IOError as e:
+            raise IOError(f"Cannot read markdown file: {e}")
 
     def _create_temp_markdown(self, content: str, work_dir: Path,
                              input_path: Path) -> Path:
@@ -419,8 +519,13 @@ class MarkdownToDocxConverter:
         """
         temp_content = self._remove_image_references(content)
         temp_md = work_dir / f"temp_{input_path.name}"
-        with open(temp_md, 'w', encoding='utf-8') as f:
-            f.write(temp_content)
+
+        try:
+            with open(temp_md, 'w', encoding='utf-8') as f:
+                f.write(temp_content)
+        except IOError as e:
+            raise IOError(f"Cannot create temporary markdown file: {e}")
+
         return temp_md
 
     def _cleanup_temp_markdown(self, temp_md: Path) -> None:
@@ -430,8 +535,30 @@ class MarkdownToDocxConverter:
         Args:
             temp_md: Path to temporary file
         """
-        if temp_md.exists():
-            temp_md.unlink()
+        try:
+            if temp_md.exists():
+                temp_md.unlink()
+        except Exception as e:
+            logger.warning(f"Could not delete temporary markdown file: {e}")
+
+    def _set_language_for_run(self, rPr) -> None:
+        """
+        Set language for a run element.
+
+        Args:
+            rPr: Run properties element
+        """
+        # Remove all existing language settings
+        lang_elements = rPr.findall(qn('w:lang'))
+        for lang in lang_elements:
+            rPr.remove(lang)
+
+        # Add new language setting
+        lang = OxmlElement('w:lang')
+        lang.set(qn('w:val'), self.config.language)
+        lang.set(qn('w:eastAsia'), self.config.language)
+        lang.set(qn('w:bidi'), self.config.language)
+        rPr.append(lang)
 
     def _setup_footers(self, doc: Document) -> None:
         """
@@ -466,7 +593,7 @@ class MarkdownToDocxConverter:
             # Add text and page number for odd pages
             run_odd = p_odd.add_run(f"{self.config.footer_text['odd']} | ")
             run_odd.font.name = self.config.font_name
-            run_odd.font.size = Pt(10)
+            run_odd.font.size = Pt(DocumentConfig.DEFAULT_FOOTER_FONT_SIZE)
             self._add_page_number(p_odd)
 
             # Configure even page footer (left pages)
@@ -480,7 +607,7 @@ class MarkdownToDocxConverter:
             self._add_page_number(p_even)
             run_even = p_even.add_run(f" | {self.config.footer_text['even']}")
             run_even.font.name = self.config.font_name
-            run_even.font.size = Pt(10)
+            run_even.font.size = Pt(DocumentConfig.DEFAULT_FOOTER_FONT_SIZE)
 
     def _add_page_number(self, paragraph) -> None:
         """
@@ -514,14 +641,11 @@ class MarkdownToDocxConverter:
         Args:
             doc: Document object to modify
         """
-        from docx.oxml import parse_xml
-        from docx.oxml.ns import nsdecls
-
         try:
             # Configure footnote text style
             style = doc.styles['Footnote Text']
             style.font.name = self.config.font_name
-            style.font.size = Pt(10)
+            style.font.size = Pt(DocumentConfig.DEFAULT_FOOTNOTE_FONT_SIZE)
             style.paragraph_format.space_before = Pt(0)
             style.paragraph_format.space_after = Pt(0)
             style.paragraph_format.line_spacing = 1.0
@@ -529,24 +653,13 @@ class MarkdownToDocxConverter:
             # Configure footnote reference style
             ref_style = doc.styles['Footnote Reference']
             ref_style.font.name = self.config.font_name
-            ref_style.font.size = Pt(10)
+            ref_style.font.size = Pt(DocumentConfig.DEFAULT_FOOTNOTE_FONT_SIZE)
             ref_style.font.superscript = True
 
             # Apply language to footnote style
             style_element = style._element
             rPr = style_element.get_or_add_rPr()
-
-            # Remove existing language settings
-            lang_elements = rPr.findall(qn('w:lang'))
-            for lang in lang_elements:
-                rPr.remove(lang)
-
-            # Add new language setting
-            lang = OxmlElement('w:lang')
-            lang.set(qn('w:val'), self.config.language)
-            lang.set(qn('w:eastAsia'), self.config.language)
-            lang.set(qn('w:bidi'), self.config.language)
-            rPr.append(lang)
+            self._set_language_for_run(rPr)
 
             # Process each footnote if they exist
             if hasattr(doc, '_part') and hasattr(doc._part, '_footnotes_part') and doc._part._footnotes_part:
@@ -557,7 +670,7 @@ class MarkdownToDocxConverter:
                         pPr = p.get_or_add_pPr()
 
                         # Set paragraph properties
-                        spacing = parse_xml(f'<w:spacing {nsdecls("w")} w:before="0" w:after="0" w:line="240" w:lineRule="auto"/>')
+                        spacing = parse_xml(f'<w:spacing {qn("w")}:before="0" {qn("w")}:after="0" {qn("w")}:line="240" {qn("w")}:lineRule="auto"/>')
                         existing_spacing = pPr.find(qn('w:spacing'))
                         if existing_spacing is not None:
                             pPr.remove(existing_spacing)
@@ -566,32 +679,26 @@ class MarkdownToDocxConverter:
                         # Process runs in the footnote
                         for r in p.xpath('.//w:r'):
                             rPr = r.get_or_add_rPr()
+                            self._set_language_for_run(rPr)
 
-                            # Remove all existing language settings
-                            lang_elements = rPr.findall(qn('w:lang'))
-                            for lang in lang_elements:
-                                rPr.remove(lang)
-
-                            # Add new language setting
-                            lang = OxmlElement('w:lang')
-                            lang.set(qn('w:val'), self.config.language)
-                            lang.set(qn('w:eastAsia'), self.config.language)
-                            lang.set(qn('w:bidi'), self.config.language)
-                            rPr.append(lang)
-
+        except KeyError as e:
+            logger.warning(f"Footnote style not found: {e}")
         except Exception as e:
-            print(f"Warning while processing footnotes: {str(e)}")
+            logger.warning(f"Warning while processing footnotes: {str(e)}")
 
-    def _post_process_document(self, doc_path: Path, document_title: str) -> None:
+    def _post_process_document(self, doc_path: Path, document_title: str,
+                               image_refs: List[dict], work_dir: Path) -> None:
         """
         Post-process the Word document with all formatting requirements.
 
-        This method applies all styling, removes duplicate titles, and
-        processes all document elements.
+        This method applies all styling, removes duplicate titles, inserts images,
+        and processes all document elements in a single pass for efficiency.
 
         Args:
             doc_path: Path to the document file
             document_title: Main document title
+            image_refs: List of image references to insert
+            work_dir: Working directory containing img folder
         """
         doc = Document(doc_path)
 
@@ -599,6 +706,34 @@ class MarkdownToDocxConverter:
         self._apply_global_styles(doc)
 
         # Find and remove any duplicate main title
+        self._remove_duplicate_titles(doc, document_title)
+
+        # Process all remaining paragraphs and insert images
+        self._process_paragraphs_and_images(doc, image_refs, work_dir)
+
+        # Process tables
+        self._process_tables(doc)
+
+        # Process footnotes
+        self._process_footnotes(doc)
+
+        # Setup footers
+        self._setup_footers(doc)
+
+        # Save the changes
+        try:
+            doc.save(doc_path)
+        except Exception as e:
+            raise IOError(f"Cannot save document: {e}")
+
+    def _remove_duplicate_titles(self, doc: Document, document_title: str) -> None:
+        """
+        Remove duplicate title paragraphs from document.
+
+        Args:
+            doc: Document object
+            document_title: Title to check for duplicates
+        """
         first_title_found = False
         paragraphs_to_remove = []
 
@@ -611,7 +746,7 @@ class MarkdownToDocxConverter:
                     para.clear()
                     run = para.add_run(document_title)
                     run.font.name = self.config.font_name
-                    run.font.size = Pt(24)
+                    run.font.size = Pt(DocumentConfig.DEFAULT_TITLE_SIZE)
                     run.font.bold = True
                 else:
                     # Mark additional occurrences for removal
@@ -622,106 +757,95 @@ class MarkdownToDocxConverter:
             p = doc.paragraphs[idx]._element
             p.getparent().remove(p)
 
-        # Process all remaining paragraphs
-        self._process_paragraphs(doc)
-        self._process_tables(doc)
-        self._process_footnotes(doc)
-        self._setup_footers(doc)
-
-        # Save the changes
-        doc.save(doc_path)
-
-    def _insert_images(self, doc_path: Path, image_refs: List[dict], work_dir: Path) -> None:
+    def _process_paragraphs_and_images(self, doc: Document, image_refs: List[dict],
+                                      work_dir: Path) -> None:
         """
-        Insert images into the document at placeholder locations.
-
-        Args:
-            doc_path: Path to the document
-            image_refs: List of image reference dictionaries
-            work_dir: Working directory containing img folder
-        """
-        doc = Document(doc_path)
-        img_dir = work_dir / "img"
-
-        for para in doc.paragraphs:
-            if '[IMAGE_PLACEHOLDER]' in para.text and image_refs:
-                img_ref = image_refs.pop(0)
-                image_path = img_dir / img_ref['path']
-
-                print(f"Processing image: {image_path}")
-
-                if image_path.exists():
-                    para.clear()
-                    run = para.add_run()
-                    try:
-                        picture = run.add_picture(str(image_path))
-
-                        # Set image size with aspect ratio preservation
-                        max_width = Inches(6)
-                        if picture.width > max_width:
-                            aspect_ratio = picture.height / picture.width
-                            picture.width = max_width
-                            picture.height = int(max_width * aspect_ratio)
-
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        print(f"Added image: {img_ref['path']}")
-
-                    except Exception as e:
-                        print(f"Error adding image {img_ref['path']}: {str(e)}")
-                        para.text = f"[Image: {img_ref['alt_text']}]"
-                else:
-                    print(f"Image not found: {image_path}")
-                    para.text = f"[Image not found: {img_ref['alt_text']}]"
-
-        doc.save(doc_path)
-
-    def _process_paragraphs(self, doc: Document) -> None:
-        """
-        Process all paragraphs in the document with formatting and language.
+        Process all paragraphs in the document and insert images.
 
         Args:
             doc: Document object to modify
+            image_refs: List of image references to insert
+            work_dir: Working directory containing img folder
         """
+        img_dir = work_dir / "img"
+
         for para in doc.paragraphs:
+            # Check for image placeholder
+            if '[IMAGE_PLACEHOLDER]' in para.text and image_refs:
+                self._insert_single_image(para, image_refs, img_dir)
+                continue
+
             # Skip paragraphs with specific styles
             if para.style.name in ['Title', 'Heading 1', 'Heading 2', 'Heading 3']:
                 continue
 
             # Process paragraphs with 'Normal' style or no specific style
             if not para.style or para.style.name == 'Normal':
-                # Apply base formatting to the paragraph
-                para.style = doc.styles['Normal']
-                para.paragraph_format.space_before = Pt(6)
-                para.paragraph_format.space_after = Pt(6)
-                para.paragraph_format.line_spacing = self.config.line_spacing
+                self._format_normal_paragraph(para)
 
-                # Process each run in the paragraph
-                for run in para.runs:
-                    # Apply base font settings
-                    run.font.name = self.config.font_name
-                    run.font.size = Pt(self.config.base_font_size)
+    def _insert_single_image(self, para, image_refs: List[dict], img_dir: Path) -> None:
+        """
+        Insert a single image into a paragraph.
 
-                    # Ensure font is set even if not specified
-                    if not run.font.name:
-                        run.font.name = self.config.font_name
-                    if not run.font.size:
-                        run.font.size = Pt(self.config.base_font_size)
+        Args:
+            para: Paragraph to insert image into
+            image_refs: List of image references
+            img_dir: Image directory path
+        """
+        img_ref = image_refs.pop(0)
+        image_path = img_dir / img_ref['path']
 
-                    # Set language for this run
-                    run_element = run._element
-                    rPr = run_element.get_or_add_rPr()
+        # Validate image file extension
+        if image_path.suffix.lower() not in self.SUPPORTED_IMAGE_EXTENSIONS:
+            logger.warning(f"Unsupported image format: {image_path.suffix}")
 
-                    # Remove all existing language settings
-                    lang_elements = rPr.findall(qn('w:lang'))
-                    for lang in lang_elements:
-                        rPr.remove(lang)
+        logger.info(f"Processing image: {image_path}")
 
-                    # Add new language setting
-                    lang = OxmlElement('w:lang')
-                    lang.set(qn('w:val'), self.config.language)
-                    lang.set(qn('w:eastAsia'), self.config.language)
-                    lang.set(qn('w:bidi'), self.config.language)
-                    rPr.append(lang)
+        if image_path.exists():
+            para.clear()
+            run = para.add_run()
+            try:
+                picture = run.add_picture(str(image_path))
+
+                # Set image size with aspect ratio preservation
+                if picture.width > self.MAX_IMAGE_WIDTH:
+                    aspect_ratio = picture.height / picture.width
+                    picture.width = self.MAX_IMAGE_WIDTH
+                    # BUGFIX: Use picture.width instead of MAX_IMAGE_WIDTH
+                    picture.height = int(picture.width * aspect_ratio)
+
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                logger.info(f"Added image: {img_ref['path']}")
+
+            except Exception as e:
+                logger.error(f"Error adding image {img_ref['path']}: {str(e)}")
+                para.text = f"[Image: {img_ref['alt_text']}]"
+        else:
+            logger.warning(f"Image not found: {image_path}")
+            para.text = f"[Image not found: {img_ref['alt_text']}]"
+
+    def _format_normal_paragraph(self, para) -> None:
+        """
+        Apply formatting to a normal paragraph.
+
+        Args:
+            para: Paragraph to format
+        """
+        # Apply base formatting to the paragraph
+        para.paragraph_format.space_before = Pt(DocumentConfig.DEFAULT_PARAGRAPH_SPACING)
+        para.paragraph_format.space_after = Pt(DocumentConfig.DEFAULT_PARAGRAPH_SPACING)
+        para.paragraph_format.line_spacing = self.config.line_spacing
+
+        # Process each run in the paragraph
+        for run in para.runs:
+            # Apply base font settings
+            run.font.name = self.config.font_name
+            run.font.size = Pt(self.config.base_font_size)
+
+            # Set language for this run
+            run_element = run._element
+            rPr = run_element.get_or_add_rPr()
+            self._set_language_for_run(rPr)
 
     def _apply_global_styles(self, doc: Document) -> None:
         """
@@ -730,7 +854,18 @@ class MarkdownToDocxConverter:
         Args:
             doc: Document object to modify
         """
-        # Set document language
+        self._set_document_language(doc)
+        self._configure_standard_styles(doc)
+        self._configure_heading_styles(doc)
+        self._configure_section_properties(doc)
+
+    def _set_document_language(self, doc: Document) -> None:
+        """
+        Set the document-wide language setting.
+
+        Args:
+            doc: Document object to modify
+        """
         element = OxmlElement('w:lang')
         element.set(qn('w:val'), self.config.language)
         element.set(qn('w:eastAsia'), self.config.language)
@@ -763,7 +898,13 @@ class MarkdownToDocxConverter:
         # Add new language
         r_pr.append(element)
 
-        # Configure standard styles
+    def _configure_standard_styles(self, doc: Document) -> None:
+        """
+        Configure standard document styles (Normal, Title).
+
+        Args:
+            doc: Document object to modify
+        """
         styles_to_configure = {
             'Normal': {
                 'font_size': self.config.base_font_size,
@@ -774,7 +915,7 @@ class MarkdownToDocxConverter:
                 'line_spacing': self.config.line_spacing
             },
             'Title': {
-                'font_size': 24,
+                'font_size': DocumentConfig.DEFAULT_TITLE_SIZE,
                 'font_name': self.config.font_name,
                 'bold': True,
                 'space_before': 12,
@@ -783,10 +924,18 @@ class MarkdownToDocxConverter:
             }
         }
 
-        # Configure heading styles (## = Heading 1, ### = Heading 2, #### = Heading 3)
+        self._apply_style_configurations(doc, styles_to_configure)
+
+    def _configure_heading_styles(self, doc: Document) -> None:
+        """
+        Configure heading styles (Heading 1-3).
+
+        Args:
+            doc: Document object to modify
+        """
         heading_styles = {
             'Heading 1': {
-                'font_size': 18,
+                'font_size': DocumentConfig.DEFAULT_HEADING_1_SIZE,
                 'font_name': self.config.font_name,
                 'bold': True,
                 'space_before': 18,
@@ -796,7 +945,7 @@ class MarkdownToDocxConverter:
                 'italic': False
             },
             'Heading 2': {
-                'font_size': 16,
+                'font_size': DocumentConfig.DEFAULT_HEADING_2_SIZE,
                 'font_name': self.config.font_name,
                 'bold': True,
                 'space_before': 16,
@@ -806,7 +955,7 @@ class MarkdownToDocxConverter:
                 'italic': False
             },
             'Heading 3': {
-                'font_size': 14,
+                'font_size': DocumentConfig.DEFAULT_HEADING_3_SIZE,
                 'font_name': self.config.font_name,
                 'bold': True,
                 'space_before': 14,
@@ -817,11 +966,19 @@ class MarkdownToDocxConverter:
             }
         }
 
-        # Merge all styles configurations
-        styles_to_configure.update(heading_styles)
+        self._apply_style_configurations(doc, heading_styles, is_heading=True)
 
-        # Apply configurations to each style
-        for style_name, config in styles_to_configure.items():
+    def _apply_style_configurations(self, doc: Document, styles_config: dict,
+                                   is_heading: bool = False) -> None:
+        """
+        Apply style configurations to document.
+
+        Args:
+            doc: Document object to modify
+            styles_config: Dictionary of style configurations
+            is_heading: Whether these are heading styles
+        """
+        for style_name, config in styles_config.items():
             try:
                 style = doc.styles[style_name]
 
@@ -842,7 +999,7 @@ class MarkdownToDocxConverter:
                 style.paragraph_format.line_spacing = config['line_spacing']
 
                 # For heading styles, ensure they're not linked to other styles
-                if style_name.startswith('Heading'):
+                if is_heading:
                     if hasattr(style, 'base_style'):
                         style.base_style = None
 
@@ -855,9 +1012,15 @@ class MarkdownToDocxConverter:
                                 pPr.remove(numPr)
 
             except KeyError:
-                print(f"Style '{style_name}' not found")
+                logger.warning(f"Style '{style_name}' not found")
 
-        # Configure section properties
+    def _configure_section_properties(self, doc: Document) -> None:
+        """
+        Configure section properties (page size, margins).
+
+        Args:
+            doc: Document object to modify
+        """
         for section in doc.sections:
             # Set page size
             if self.config.paper_size == PaperSize.LETTER:
@@ -883,74 +1046,66 @@ class MarkdownToDocxConverter:
         Args:
             doc: Document object to modify
         """
-        table_font_size = 10  # Fixed size for table content
-
         for table in doc.tables:
             # Process header row (first row)
             if table.rows:
                 for cell in table.rows[0].cells:
-                    for para in cell.paragraphs:
-                        # Configure header cell
-                        for run in para.runs:
-                            run.font.name = self.config.font_name
-                            run.font.size = Pt(table_font_size)
-                            run.font.bold = True
-
-                        # Ensure paragraph has at least one run
-                        if not para.runs:
-                            run = para.add_run()
-                            run.font.name = self.config.font_name
-                            run.font.size = Pt(table_font_size)
-                            run.font.bold = True
+                    self._format_table_cell(cell, is_header=True)
 
             # Process all rows
             for row in table.rows:
                 for cell in row.cells:
-                    for para in cell.paragraphs:
-                        # Configure regular cell
-                        for run in para.runs:
-                            run.font.name = self.config.font_name
-                            run.font.size = Pt(table_font_size)
-
-                            # Set language for this run
-                            run_element = run._element
-                            rPr = run_element.get_or_add_rPr()
-
-                            # Remove all existing language settings
-                            lang_elements = rPr.findall(qn('w:lang'))
-                            for lang in lang_elements:
-                                rPr.remove(lang)
-
-                            # Add new language setting
-                            lang = OxmlElement('w:lang')
-                            lang.set(qn('w:val'), self.config.language)
-                            lang.set(qn('w:eastAsia'), self.config.language)
-                            lang.set(qn('w:bidi'), self.config.language)
-                            rPr.append(lang)
-
-                        # Ensure paragraph has proper formatting
-                        if not para.runs:
-                            run = para.add_run()
-                            run.font.name = self.config.font_name
-                            run.font.size = Pt(table_font_size)
-
-                        # Set paragraph properties
-                        para.paragraph_format.space_before = Pt(2)
-                        para.paragraph_format.space_after = Pt(2)
-                        para.paragraph_format.line_spacing = 1.0
-
-                    # Add borders to cell
+                    self._format_table_cell(cell, is_header=False)
                     self._set_cell_borders(cell)
+
+    def _format_table_cell(self, cell: _Cell, is_header: bool = False) -> None:
+        """
+        Format a table cell with appropriate styling.
+
+        Args:
+            cell: Cell to format
+            is_header: Whether this is a header cell
+        """
+        for para in cell.paragraphs:
+            # Configure cell
+            for run in para.runs:
+                run.font.name = self.config.font_name
+                run.font.size = Pt(DocumentConfig.DEFAULT_TABLE_FONT_SIZE)
+                if is_header:
+                    run.font.bold = True
+
+                # Set language for this run
+                run_element = run._element
+                rPr = run_element.get_or_add_rPr()
+                self._set_language_for_run(rPr)
+
+            # Ensure paragraph has at least one run
+            if not para.runs:
+                run = para.add_run()
+                run.font.name = self.config.font_name
+                run.font.size = Pt(DocumentConfig.DEFAULT_TABLE_FONT_SIZE)
+                if is_header:
+                    run.font.bold = True
+
+            # Set paragraph properties
+            para.paragraph_format.space_before = Pt(DocumentConfig.DEFAULT_TABLE_CELL_SPACING)
+            para.paragraph_format.space_after = Pt(DocumentConfig.DEFAULT_TABLE_CELL_SPACING)
+            para.paragraph_format.line_spacing = 1.0
 
     def _set_cell_borders(self, cell: _Cell) -> None:
         """
-        Add borders to a table cell.
+        Add borders to a table cell if not already present.
 
         Args:
             cell: Cell object to add borders to
         """
         tc = cell._tc
         tcPr = tc.get_or_add_tcPr()
+
+        # Check if borders already exist
+        existing_borders = tcPr.find(qn('w:tcBorders'))
+        if existing_borders is not None:
+            return  # Borders already set
 
         # Create borders element
         tcBorders = OxmlElement('w:tcBorders')
@@ -989,7 +1144,7 @@ def main():
     )
 
     # Create converter and process file
-    converter = MarkdownToDocxConverter(config)
+    converter = MarkdownToDocxConverter(config, verbose=True)
 
     try:
         converter.convert(
@@ -998,7 +1153,7 @@ def main():
             working_dir="."
         )
     except Exception as e:
-        print(f"Error during conversion: {str(e)}")
+        logger.error(f"Error during conversion: {str(e)}")
 
 
 if __name__ == "__main__":
