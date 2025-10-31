@@ -254,8 +254,11 @@ md2docx/
 ├── src/
 │   └── md2docx/
 │       ├── __init__.py       # Package initialization
-│       └── converter.py      # Main converter module
-├── test_md2docx.py           # Unit tests
+│       ├── converter.py      # Main converter module
+│       └── __main__.py       # CLI entry point
+├── tests/
+│   ├── __init__.py           # Tests package
+│   └── test_md2docx.py       # Unit tests
 ├── README.md                 # Documentation
 ├── CHANGELOG.md              # Version history
 ├── LICENSE                   # License file
@@ -350,10 +353,16 @@ The project includes comprehensive unit tests. To run them:
 pip install -e ".[dev]"
 
 # Run tests
-pytest test_md2docx.py -v
+pytest tests/ -v
 
 # Run tests with coverage
-pytest test_md2docx.py -v --cov=md2docx --cov-report=html
+pytest tests/ -v --cov=md2docx --cov-report=html
+
+# Run a specific test file
+pytest tests/test_md2docx.py -v
+
+# Run a specific test
+pytest tests/test_md2docx.py::TestDocumentConfig::test_default_config -v
 ```
 
 ### Test Coverage

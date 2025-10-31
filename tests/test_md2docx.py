@@ -1,17 +1,14 @@
 """
 Unit tests for md2docx converter.
 
-Run with: python -m pytest test_md2docx.py -v
+Run with: pytest tests/ -v
+Or: python -m pytest tests/ -v
 """
 
 import pytest
 from pathlib import Path
 import tempfile
 import shutil
-import sys
-
-# Add src to path for testing
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from md2docx import (
     MarkdownToDocxConverter,
